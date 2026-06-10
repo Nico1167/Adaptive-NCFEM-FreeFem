@@ -1,0 +1,580 @@
+/*********************************************************************
+ * a priori error estimates, a posteriori error estimates, and adaptivity for the
+ * Crouzeix-Raviart nonconforming finite elements and a model diffusion problem
+ * following A. Ern and M. VohralÃ­k, SIAM J. Sci. Comput. 35 (2013), A1761--A1791
+ * DOI~10.1137/120896918
+ * usage: cript for FreeFem++ 
+ * file: NC.edp  
+ * author: Martin Vohralik
+ * based on scripts by FrÃ©deric Hecht, Zuqi Tang, Benjamin Stamm, and Hussein Albazzal
+ * February 2026
+ *********************************************************************/
+
+// loading packages not loaded by default
+load "Element_Mixte" 	// the Raviart-Thomas elements for flux equilibration
+//verbosity = 1;			// FreeFem++ verbosity (level of reported compilation and execution details)
+
+//**************************************
+//  USER INPUT
+//**************************************
+
+int nds = 5; // number of mesh points on one unit boundary edge of the domain Omega
+int FinalLevel = 7; // maximal refinement level 
+
+macro Pcontp P2		// H^1-conforming pw polynomials for plotting the exact solution: "P2"
+macro Pcont P1		// H^1-conforming pw polynomials for the potential reconstruction: "P1" or "P2"
+macro RT RT0		// H(div)-conforming pw polynomials for the flux reconstruction: "RT0"
+macro Pdiscp P2dc	// discontinuous pw polynomials for plotting the fluxes and flux reconstruction: "P2dc"
+int verb = 4; // verbosity for demonstrations and debugging
+
+bool PlotMesh = 1, PlotSolAppr = 0, PlotSolApprFluxes = 0, PlotPotRec = 0, PlotApprPot = 0, PlotFluxRec = 0, PlotErr = 0, PlotEst = 1; // what to plot
+bool RunSmooth = 1; // 1 means smooth example, 0 means singular example
+bool RunAdaptive = 0; // 1 means adaptive mesh refinement, 0 means uniform mesh refinement
+bool ImposeBC0 = 1; // potential reconstruction: impose boundary values 0 where a homogeneous Dirichlet BC is prescribed
+
+real Dtheta=sqrt(0.5); // DÃ¶rfler marking parameter for adaptivity
+int RefFactor=4; // factor by which (approximately) the marked elements should become smaller in the adapted mesh
+
+// exact solution and its derivatives
+// boundary condition gd
+// source function f
+
+
+// CASE 1 (smooth polynomial in a unit square)
+
+/*
+func uEx = x*(x-1)*y*(y-1); 	// exact solution
+func dxuEx = (2*x-1)*y*(y-1);  	// exact solution x derivative
+func dyuEx = (2*y-1)*x*(x-1);  	// exact solution y derivative
+func duExSize = sqrt(dxuEx^2+dyuEx^2); // exact solution gradient magnitude
+func f = -2*(x*x+y*y)+2*(x+y); 	// right-hand side source term
+func gd = x*(x-1)*y*(y-1); 		// exact solution on the Dirichlet boundary
+*/
+
+
+func uEx = sin(pi*x)*sin(pi*y); 		// exact solution
+func dxuEx = pi*cos(pi*x)*sin(pi*y);  	// exact solution x derivative
+func dyuEx = pi*sin(pi*x)*cos(pi*y);  	// exact solution y derivative
+func duExSize = sqrt(dxuEx^2+dyuEx^2); 	// exact solution gradient magnitude
+func f = 2*pi*pi*sin(pi*x)*sin(pi*y); 	// right-hand side source term
+func gd = sin(pi*x)*sin(pi*y); 				// exact solution on the Dirichlet boundary
+
+
+// define the computational mesh 
+mesh Th = square(nds,nds); // generate a triangular mesh of a square domain with nds+1 points per edge
+
+
+// CASE 2 (vertex singularity)
+
+
+/*
+func theta=atan2(y, x)-2*pi*fmin(sign(y),0); // we need the angle theta between 0 and 3*pi/2
+func r=(x^2+y^2)^(1/2.0); // radius
+func uEx = r^(2/3.0)*sin(2*theta/3.0); 	// exact solution in polar coordinates
+func dxuEx = -2*sin(theta/3.0)/r^(1/3.0)/3.0;  	// exact solution x derivative - simplified expression and 3.0 for the C++ convention
+func dyuEx = 2*cos(theta/3.0)/r^(1/3.0)/3.0;  	// exact solution y derivative - simplified expression and 3.0 for the C++ convention
+func duExSize = sqrt(dxuEx^2+dyuEx^2); // exact solution gradient magnitude
+func f = 0; 	// right-hand side source term
+func gd = r^(2/3.0)*sin(2*theta/3.0);  	// exact solution on the Dirichlet boundary
+
+// domain boundary segments
+border b1(t=0, 1){x=t; y=0; label=1;};
+border b2(t=0, 1){x=1; y=t; label=5;};
+border b3(t=0, 2){x=1-t; y=1; label=5;};
+border b4(t=0, 2){x=-1; y=1-t; label=5;};
+border b5(t=0, 1){x=-1+t; y=-1; label=5;};
+border b6(t=0, 1){x=0; y=-1+t; label=1;};
+//define the computational mesh 
+mesh Th = buildmesh(b1(nds) + b2(nds) + b3(2*nds) + b4(2*nds) + b5(nds) + b6(nds));
+*/
+
+
+//**************************************
+//   USEFUL SETTINGS
+//**************************************
+
+// macro definitions
+macro Div(u1,u2) (dx(u1)+dy(u2))  // divergence
+macro Grad(u) [dx(u),dy(u)]   // gradient
+
+macro NbIso 21		// number of isovalues for plotting (more than 20 unless FreeFem++ bug fixed)
+macro SolverGlob sparsesolver	// global system linear solver: CG or sparsesolver 
+
+real em = 0.99, ep = 1.01; // under- and over-shoot for correct visualisation
+real sp = 1.3/nds; // extension of the colormap for correct visualisation of the nonconforming finite element approximation
+if (RunSmooth == 0) sp = 0.3/nds;
+ofstream ff("stats.txt"); // text file for reporting basic simulation resuls and statistics
+
+// standard matlab jet colormap
+real[int] jet = [0.6667, 1.0000, 0.5625,  0.6667, 1.0000, 0.6250,  0.6667, 1.0000, 0.6875,  0.6667, 1.0000, 0.7500,  0.6667, 1.0000, 0.8125, 0.6667, 1.0000, 0.8750,
+ 0.6667, 1.0000, 0.9375, 0.6667, 1.0000, 1.0000, 0.6563, 1.0000, 1.0000, 0.6458, 1.0000, 1.0000, 0.6354, 1.0000, 1.0000, 0.6250, 1.0000, 1.0000, 0.6146, 1.0000, 1.0000,
+ 0.6042, 1.0000, 1.0000, 0.5938, 1.0000, 1.0000, 0.5833, 1.0000, 1.0000, 0.5729, 1.0000, 1.0000, 0.5625, 1.0000, 1.0000, 0.5521, 1.0000, 1.0000, 0.5417, 1.0000, 1.0000,
+ 0.5313, 1.0000, 1.0000, 0.5208, 1.0000, 1.0000, 0.5104, 1.0000, 1.0000, 0.5000, 1.0000, 1.0000, 0.4889, 0.9375, 1.0000, 0.4762, 0.8750, 1.0000, 0.4615, 0.8125, 1.0000,
+ 0.4444, 0.7500, 1.0000, 0.4242, 0.6875, 1.0000, 0.4000, 0.6250, 1.0000, 0.3704, 0.5625, 1.0000, 0.3333, 0.5000, 1.0000, 0.2963, 0.5625, 1.0000, 0.2667, 0.6250, 1.0000,
+ 0.2424, 0.6875, 1.0000, 0.2222, 0.7500, 1.0000, 0.2051, 0.8125, 1.0000, 0.1905, 0.8750, 1.0000, 0.1778, 0.9375, 1.0000, 0.1667, 1.0000, 1.0000, 0.1563, 1.0000, 1.0000,
+ 0.1458, 1.0000, 1.0000, 0.1354, 1.0000, 1.0000, 0.1250, 1.0000, 1.0000, 0.1146, 1.0000, 1.0000, 0.1042, 1.0000, 1.0000, 0.0938, 1.0000, 1.0000, 0.0833, 1.0000, 1.0000,
+ 0.0729, 1.0000, 1.0000, 0.0625, 1.0000, 1.0000, 0.0521, 1.0000, 1.0000, 0.0417, 1.0000, 1.0000, 0.0313, 1.0000, 1.0000, 0.0208, 1.0000, 1.0000, 0.0104, 1.0000, 1.0000,
+ 0, 1.0000, 1.0000, 0, 1.0000, 0.9375, 0, 1.0000, 0.8750, 0, 1.0000, 0.8125, 0, 1.0000, 0.7500, 0, 1.0000, 0.6875, 0, 1.0000, 0.6250, 0, 1.0000, 0.5625, 0, 1.0000, 0.5000]; 
+
+//**************************************
+// CODE
+//**************************************
+
+// Crouzeix-Raviart NCFE approximation space and variables
+fespace VhNC(Th,P1nc); // piecewise 1st order polynomials on the mesh Th, continuous in midpoints of the edges
+VhNC uh,vh;  // NCFE approximation and test function 
+
+// standard conforming FE approximation space
+fespace Vh(Th,Pcont); // H^1-conforming pw polynomials of degree Pcont for the potential reconstruction
+Vh sh;  // potential reconstruction
+
+fespace Wh0(Th,P0); // space of piecewise constants for various purposes
+Wh0 EstDistTot; // elementwise a posteriori error estimates
+real[int] Errors(FinalLevel+1); // errors on mesh levels
+real[int] Estimators(FinalLevel+1); // estimators on mesh levels
+real[int] DoFs(FinalLevel+1); // DoFs on mesh levels
+int CurLevel; // current mesh level
+
+// potential reconstruction
+func int ComputPotRec()
+	{
+	sh=uh; // automatic interpolation of all possibly different values of uh in VhNC to prescribe sh in each Lagrange node of the space Vh
+
+	if (ImposeBC0) // impose the homogeneous boundary value
+		{
+		Vh sBC=0, vhh;  
+		varf aBC (sBC, vhh) = on(1, 2, 3, 4, sBC=sh); // only boundary condition on boundaries 1,2,3,4, fixed to sh
+		sBC[] = aBC(0, Vh, tgv = 1); // impose all boundary values; tgv value important, otherwise 1e30, crashes...
+		if(PlotPotRec && verb >= 4)
+			{
+			real[int]isovalues=em*sBC[].min:(ep*sBC[].max-em*sBC[].min)/(NbIso-1):ep*sBC[].max; // isovalues from minimal to maximal value (under- and over-shoot treated by em and ep)
+			plot(Th, sBC, wait=1, value=1, fill=1, dim=3, viso=isovalues, hsv=jet, cmm="correction of the potential reconstruction on the homogeneous Dirichlet boundary");
+			}
+		sh[]-=sBC[]; // fixex the value of sh zero on boundaries 1, 2, 3, 4
+		}
+	}
+
+// computing the exact error and its distribution over mesh elements
+func int ErrDist()
+	{
+	real Error;
+	if(PlotErr) 
+		{
+		Wh0 ErrDistField; // elementwise errors	
+		varf ErrDistForm(unused,chiK) = int2d(Th)(
+			chiK*((Grad(uh)-[dxuEx,dyuEx])'
+			*(Grad(uh)-[dxuEx,dyuEx])));
+ 		ErrDistField[]=ErrDistForm(0,Wh0);
+ 		Error=sqrt(ErrDistField[].sum);
+ 		ErrDistField=sqrt(ErrDistField);
+
+		real[int]isovalues=0:ErrDistField[].max/(NbIso-1):ErrDistField[].max; // isovalues from minimal to maximal value
+		plot(Th, dim=3, ErrDistField, wait=1, value=1, fill=1, viso=isovalues, hsv=jet, cmm="energy errors", ps="05_errors.eps"); 
+		cout<<"energy error "<<Error<<endl; 
+		}
+
+	// (re)computing the error directly - the above may be imprecise for the singular L-shape problem
+	Error=sqrt(int2d(Th, qft=qf9pT)((Grad(uh)-[dxuEx,dyuEx])'*(Grad(uh)-[dxuEx,dyuEx])));
+    Errors[CurLevel] = Error;
+	cout<<"energy error "<<Error<<endl;
+	}
+
+// RHS data approximation by L2 orthogonal projection
+Wh0 Pif, wh; // Wh Piff = f would be elementwise Lagrange interplolation but we need L2 orthogonal projection (mean values)
+func int Projf()
+	{
+	varf L2proj(Pif,wh)=int2d(Th)(Pif*wh) + int2d(Th)(f*wh); // L2 scalar product
+	matrix MassMatr=L2proj(Wh0,Wh0,solver=SolverGlob); // mass matrix
+	real[int] MassRHS=L2proj(0,Wh0); // f on the RHS
+	Pif[]=MassMatr^-1*MassRHS; // L2-orthogonal projection of f
+	}
+
+// RT function spaces and variables
+fespace RTG(Th,RT); // global space for the equilibrated flux
+RTG [sigma1,sigma2]=[0,0]; // equilibrated flux
+func xx = x; 	// x-coordinate function
+func yy = y; 	// y-coordinate function
+
+// equilibrated flux reconstruction
+func int ComputEquilFlux()
+	{
+	Wh0 sgt1=0,sgt2=0; // barycentric part of the equilibrated flux
+	// fill to [sgt1, sgt2] the barycenters of the mesh elements
+	for(int i=0; i<Th.nt; i++) // run through the mesh elements i
+		{
+		for(int j=0; j<3; j++) // run through the vertices j of the element i
+			{	
+			sgt1[][i]+=Th[i][j].x/3.0;
+			sgt2[][i]+=Th[i][j].y/3.0;
+			}
+		}
+
+	// the equilibrated flux reconstruction formula	
+	[sigma1,sigma2]=[-dx(uh)+Pif*xx/2.0-Pif*sgt1/2.0,-dy(uh)+Pif*yy/2.0-Pif*sgt2/2.0];
+	}
+
+// computing the a posteriori error estimate and estimator distribution
+func int EstDist()
+	{
+ 	if(PlotEst)
+		{
+		real EstTot, EstFlux, EstPot, EstOsc;
+ 
+		varf EstDistFormFlux(unused,chiK) = int2d(Th)(
+			chiK*((Grad(uh) + [sigma1,sigma2])'
+			*(Grad(uh) + [sigma1,sigma2])));
+ 		varf EstDistFormPot(unused,chiK) = int2d(Th)(
+			chiK*((Grad(uh) - Grad(sh))'
+			*(Grad(uh) - Grad(sh))));
+ 		varf EstDistFormOsc(unused,chiK) = int2d(Th)(
+			chiK*(hTriangle*hTriangle/pi/pi*(f-Pif)*(f-Pif)));
+
+		Wh0 EstDistFlux, EstDistPot, EstDistOsc;
+
+		EstDistFlux[]=EstDistFormFlux(0,Wh0);
+		EstDistPot[]=EstDistFormPot(0,Wh0);
+ 		EstDistOsc[]=EstDistFormOsc(0,Wh0);
+
+ 		EstFlux=sqrt(EstDistFlux[].sum);
+		cout<<"flux part "<<EstFlux<<endl;
+ 		EstPot=sqrt(EstDistPot[].sum);
+		cout<<"potential part "<<EstPot<<endl;
+ 		EstOsc=sqrt(EstDistOsc[].sum);
+		cout<<"oscillation part "<<EstOsc<<endl;
+
+		EstDistFlux=sqrt(EstDistFlux);
+		EstDistPot=sqrt(EstDistPot);
+		EstDistOsc=sqrt(EstDistOsc);
+
+		EstDistTot=EstDistFlux+EstDistOsc;
+		EstDistTot=EstDistTot*EstDistTot+EstDistPot*EstDistPot;
+
+		EstTot=sqrt(EstDistTot[].sum);
+		cout<<"flux and potential estimator "<<EstTot<<endl;
+		cout<<"effectivity index "<<EstTot/Errors[CurLevel]<<endl;
+ 		Estimators[CurLevel] = EstTot;
+
+		// simple sum for plotting and adaptivity
+		EstDistTot=EstDistFlux+EstDistPot+EstDistOsc;
+		real[int]isovalues=0:EstDistTot[].max/(NbIso-1):EstDistTot[].max;
+		plot(EstDistTot, wait=1, value=1, fill=1, viso=isovalues, hsv=jet, cmm="flux and potential estimators", ps="09_flux_pot_estimators.eps");
+		}
+	else
+		{
+		real EstTot;
+
+		// simplified, all in one form
+		varf EstDistFormTot(unused,chiK) = int2d(Th)(
+			chiK*((Grad(uh) + [sigma1,sigma2])'
+			*(Grad(uh) + [sigma1,sigma2])
+			+(Grad(uh) - Grad(sh))'*(Grad(uh) - Grad(sh))
+			+hTriangle*hTriangle/pi/pi*(f-Pif)*(f-Pif)));
+
+		EstDistTot[]=EstDistFormTot(0,Wh0);
+		EstTot=sqrt(EstDistTot[].sum);
+		cout<<"flux and potential estimator "<<EstTot<<endl;
+		cout<<"effectivity index "<<EstTot/Errors[CurLevel]<<endl;
+ 		Estimators[CurLevel] = EstTot;
+		EstDistTot=sqrt(EstDistTot);
+		}
+	}
+
+// weak form
+varf a(uh,vh)=int2d(Th)(Grad(uh)'*Grad(vh)) 
+			+ int2d(Th)(Pif*vh) // including Pif and not f -> yields an equilibrated flux
+			+ on(1,2,3,4,5,uh=gd);
+
+func int NCFE()
+	{
+	matrix A=a(VhNC,VhNC,solver=SolverGlob); // construction of the matrix and choice of the linear algebraic solver
+	real[int] b=a(0,VhNC); // construction of the right-hand side
+	uh[]=A^-1*b; // algebraic solve
+}
+
+if (PlotMesh)
+	plot(Th, wait=true, cmm="initial mesh", ps="00_initial_mesh.eps");
+
+
+for (CurLevel=0; CurLevel<=FinalLevel; CurLevel++)
+	{
+	real cpu; // for measuring execution times
+	if (CurLevel > 0 && sp > 0.08) sp/=3.5; // diminish the colormap extension 
+	cout << endl << endl << "mesh level " << CurLevel << endl; 
+	if (CurLevel == 0) ff << "mesh level " << CurLevel << endl; else ff << endl << endl << "mesh level " << CurLevel << endl;
+
+	// find the NCFE approximation
+	cpu=clock();
+	uh=0;
+	DoFs[CurLevel] = uh[].n; // number of degrees of freedom
+	cout << "number of degrees of freedom " << DoFs[CurLevel] << endl; ff << "DoFs " << DoFs[CurLevel] << endl;
+	ff << "CPU transfer uh " << (clock()-cpu) << endl;
+
+	cpu=clock();
+  	Pif=0; // update the variables if mesh has changed
+	ff << "CPU transfer fh " << (clock()-cpu) << endl;
+
+	cpu=clock();
+	Projf();
+	ff << "CPU L2 orth proj " << (clock()-cpu) << endl;
+
+	cpu=clock();
+	NCFE();
+	cout << "CPU time of matrix assembly and nonconforming FE solution = " << (clock()-cpu) << endl; ff << "CPU matrix assembly and NCFE solution " << (clock()-cpu) << endl;
+
+	// compute the potential reconstruction	
+	cpu=clock();
+	sh=0;
+	ff << "CPU transfer sh " << (clock()-cpu) << endl;
+
+	cpu=clock();
+	ComputPotRec();
+	cout << "CPU time of potential reconstruction = " << (clock()-cpu) << endl; ff << "CPU potential reconstruction " << (clock()-cpu) << endl;
+
+	// compute the flux reconstruction	
+	cpu=clock();
+	[sigma1,sigma2]=[0,0]; // update the variables if mesh has changed
+	ff << "CPU transfer sigmah " << (clock()-cpu) << endl;
+
+	cpu=clock();
+	ComputEquilFlux();
+	cout << "CPU time of equilibrated flux reconstruction = " << (clock()-cpu) << endl; ff << "CPU flux reconstruction " << (clock()-cpu) << endl;
+
+	// visualisation of the exact solution and numerical approximation
+	if(PlotSolAppr) 
+		{
+		fespace Vhp(Th,Pcontp); // Pcontp = higher-order piecewise continuous polynomials on the mesh Th
+		Vhp uvis=uEx;   // visualisation of the exact solution by Lagrange interpolation into the Vhp space
+
+		real[int]isovalues=em*uvis[].min:(ep*uvis[].max-em*uvis[].min)/(NbIso-1):ep*uvis[].max; // isovalues from minimal to maximal value (under- and over-shoot treated by em and ep)
+		plot(Th, uvis, wait=1, value=1, fill=1, dim=3, viso=isovalues, hsv=jet, cmm="exact solution", ps="01_exact_solution.eps", boundary=false);
+
+		real span=uh[].max-uh[].min;
+		real[int]isovalues2=uh[].min-span*sp:((1+2*sp)*span)/(NbIso-1):uh[].max+span*sp;	// isovalues from minimal to maximal value (proportional extension by sp)
+		plot(Th, uh, wait=1, value=1, fill=1, dim=3, viso=isovalues2, hsv=jet, cmm="numerical approximation", ps="02_numer_approximation.eps", boundary=false);
+		}
+
+	// visualisation of the potential reconstruction
+	if(PlotPotRec) 
+		{
+		real[int]isovalues3=sh[].min:(sh[].max-sh[].min)/(NbIso-1):sh[].max;	// isovalues from minimal to maximal value
+		plot(Th, sh, wait=1, value=1, fill=1, dim=3, viso=isovalues3, hsv=jet, cmm="potential reconstruction", ps="06_potential_reconstruction.eps", boundary=false);
+		}
+
+	// visualisation of the difference approximation - reconstruction
+	if(PlotApprPot) 
+		{
+		fespace Vhp(Th,Pdiscp); // piecewise discontinuous polynomials on the mesh Th
+		Vhp uvis = uh-sh;
+
+		real[int]isovalues=em*uvis[].min:(ep*uvis[].max-em*uvis[].min)/(NbIso-1):ep*uvis[].max; // isovalues from minimal to maximal value (under- and over-shoot treated by em and ep)
+		plot(Th, uvis, wait=1, value=1, fill=1, dim=3, viso=isovalues, hsv=jet, cmm="difference approximation - reconstruction", ps="07_diff_approximation_reconstruction.eps", boundary=false);
+		}
+
+	// visualisation of the exact solution and numerical approximation fluxes (minus gradients)
+	if(PlotSolApprFluxes) 
+		{
+		fespace Vhp(Th,Pdiscp); // piecewise discontinuous polynomials on the mesh Th
+		Vhp uvisdx=-dxuEx, uvisdy=-dyuEx, uvisdSize=duExSize;   // visualisation of the exact flux by Lagrange interpolation into the Vhp space in each component
+		Vhp uhx=-dx(uh), uhy=-dy(uh), uhdSize = sqrt(uhx^2+uhy^2); // visualisation of the approximate flux by Lagrange interpolation into the Vhp space
+		plot(Th,[uvisdx,uvisdy], wait=1, value=1, hsv=jet, cmm="exact flux", ps="03_exact_flux.eps");
+		plot(Th,[uhx,uhy], wait=1, value=1, hsv=jet, cmm="finite element flux", ps="04_finite_element_flux.eps");
+	
+		real[int]isovalues=em*uvisdSize[].min:(ep*uvisdSize[].max-em*uvisdSize[].min)/(NbIso-1):ep*uvisdSize[].max; // isovalues from minimal to maximal value (under- and over-shoot treated by em and ep)
+		plot(Th, uvisdSize, wait=1, value=1, fill=1, viso=isovalues, hsv=jet, cmm="exact flux magnitude", ps="03_exact_flux_magnitude.eps");
+		real[int]isovalues2=em*uhdSize[].min:(ep*uhdSize[].max-em*uhdSize[].min)/(NbIso-1):ep*uhdSize[].max; // isovalues from minimal to maximal value (under- and over-shoot treated by em and ep)
+		plot(Th, uhdSize, wait=1, value=1, fill=1, viso=isovalues2, hsv=jet, cmm="finite element flux magnitude", ps="04_finite_element_flux_magnitude.eps");
+		}
+
+	// visualisation of the flux reconstruction
+	if(PlotFluxRec) 
+		{
+		fespace Vhp(Th,Pdiscp); // piecewise discontinuous polynomials on the mesh Th
+		Vhp uhx=sigma1, uhy=sigma2; // visualisation of the approximate flux by Lagrange interpolation into the Vhp space
+		plot(Th,[uhx,uhy], wait=1, value=1, hsv=jet, cmm="equilibrated flux", ps="08_equilibrated_flux.eps");
+
+
+	 	//compute the divergence misfit of the equilibrated flux
+		varf EstDistFormDiv(unused,chiK) = int2d(Th)(
+			chiK*((Pif-Div(sigma1,sigma2))*(Pif-Div(sigma1,sigma2))));
+
+ 		Wh0 EstDistDiv;
+		real EstDiv;
+
+ 		EstDistDiv[]=EstDistFormDiv(0,Wh0);
+	 	EstDiv=sqrt(EstDistDiv[].sum);
+		cout<<"divergence check for the equilibrated flux "<<EstDiv<<endl;
+ 
+		EstDistDiv=sqrt(EstDistDiv);
+		real[int]isovalues=0:EstDistDiv[].max/(NbIso-1):EstDistDiv[].max;
+ 		plot(EstDistDiv, wait=1, value=1, fill=1, viso=isovalues, hsv=jet, cmm="divergence misfit of the equilibrated flux", ps="08_equilibrated_flux_divergence_misfit.eps");
+		}
+
+	cpu=clock();
+	EstDistTot=0; // udate EstDistTot to mesh change
+	ff << "CPU transfer estimators " << (clock()-cpu) << endl;
+
+	cpu=clock();
+	ErrDist();
+	cout << "CPU time of error computing = " << (clock()-cpu) << endl; ff << "CPU error " << (clock()-cpu) << endl;
+
+	cpu=clock();
+	EstDist();
+	cout << "CPU time of a posteriori estimators computing = " << (clock()-cpu) << endl; ff << "CPU estimator " << (clock()-cpu) << endl;
+
+	cout << endl;
+
+	if (RunAdaptive)
+		{
+		cpu=clock();
+		Wh0 ElSizes, MarkedElements = 0; // diameters of mesh elements, elements marked for refinement
+		ElSizes=hTriangle; // diameter h_K for each mesh element
+
+		if(verb>=4) 
+			{
+			real[int]isovalues2=ElSizes[].min:(ElSizes[].max-ElSizes[].min)/(NbIso-1):ElSizes[].max; // isovalues from minimal to maximal value
+			plot(Th, ElSizes, wait=1, value=1, fill=1, viso=isovalues2, hsv=jet, cmm="diameters of mesh elements"); 
+			}
+
+		EstDistTot=EstDistTot*EstDistTot; // working with squares of the estimators
+		if(verb>=5) cout<<"estimators squared "<<EstDistTot[]<<endl;
+ 		real Fraction=Dtheta^2*EstDistTot[].sum; // theta fraction of the most important estimators
+		if(verb>=3) cout<<"estimators squared sum "<<EstDistTot[].sum<<endl;
+		if(verb>=3) cout<<"fraction "<<Fraction<<endl;
+ 		real[int] ErrSort=EstDistTot[];
+ 		int[int] num=0:(Th.nt-1);
+ 		sort(ErrSort,num); // sorting by the size of the estimator, correspondence to the original nmbering
+		if(verb>=5) cout<<"estimators squared sorted "<<ErrSort<<endl;
+ 		real s=0;
+		int i;
+ 		for(i=num.n-1; i>=0; i--) 
+			{
+			s+=ErrSort[i];
+			ElSizes[][num[i]]/=RefFactor; // requested size of elements in the next mesh
+			MarkedElements[][num[i]]=1;   // elements marked for refinement
+			if (s>Fraction) break;        // taking just the Dtheta bulk fraction
+ 			}
+		EstDistTot=sqrt(EstDistTot); // back to the estimators
+		cout << "number of mesh elements marked for refinement: " << num.n-i << endl;
+		cout << "CPU time of marking = " << (clock()-cpu) << endl; ff << "CPU marking " << (clock()-cpu) << endl;
+
+		if(verb>=4) 
+			{
+			real[int]isovalues3=ElSizes[].min:(ElSizes[].max-ElSizes[].min)/(NbIso-1):ElSizes[].max; // isovalues from minimal to maximal value
+			plot(Th, ElSizes, wait=1, value=1, fill=1, viso=isovalues3, hsv=jet, cmm="requested diameters for the new mesh elements"); 
+			}
+
+		if(verb>=3) 
+			{
+			real[int]isovalues4=MarkedElements[].min:(MarkedElements[].max-MarkedElements[].min)/(NbIso-1):MarkedElements[].max; // isovalues from minimal to maximal value
+			plot(Th, MarkedElements, wait=1, value=1, fill=1, viso=isovalues4, hsv=jet, cmm="elements marked for refinement", ps="00_elements_marked_refinement.eps"); 
+			}
+
+		if (CurLevel<FinalLevel) 
+			{
+			cpu=clock();
+			Th = adaptmesh(Th, ElSizes, IsMetric=1, keepbackvertices=0, nbvx=1000000); // FreeFem command to generate a new mesh with the marked elements approximately RefFactor smaller 
+			if (PlotMesh)
+				plot(Th, wait=true, cmm="adaptively refined mesh " +(CurLevel+1), ps="00_adaptively_refined_mesh.eps");
+			}
+			cout << "CPU time of mesh regeneration = " << (clock()-cpu) << endl; ff << "CPU mesh regeneration " << (clock()-cpu) << endl;
+		}
+	else
+		{
+		if (CurLevel<FinalLevel) 
+			{
+			// For the smooth example, the new meshes are re-generated.
+			// For the singular example, the mesh are is obtained by the command splitmesh
+			cpu=clock();
+			if (RunSmooth)
+ 				{
+				nds*=2;
+				Th = square(nds,nds);
+  				}
+  			else
+				{
+				Th = splitmesh(Th,2);
+  				}
+			if (PlotMesh)
+				plot(Th, wait=true, cmm="uniformly refined mesh " +(CurLevel+1), ps="00_uniformly_refined_mesh.eps");
+			cout << "CPU time of mesh regeneration = " << (clock()-cpu) << endl; ff << "CPU mesh regeneration " << (clock()-cpu) << endl;
+			}
+		}
+	}
+
+// compute the effectivity index
+
+real[int] EffectivityIndex(FinalLevel+1);
+for (int i=0; i<=FinalLevel; i++)
+	EffectivityIndex[i] = Estimators(i)/Errors(i);
+
+cout<<endl; ff<<endl;
+cout<<"Total number of DoFs "<<DoFs<<endl; ff<<"Total number of DoFs "<<DoFs<<endl;
+cout<<"Energy errors "<< Errors<<endl; ff<<"Energy errors "<< Errors<<endl;
+cout<<"A posteriori error estimators "<<Estimators<<endl; ff<<"Error estimators "<<Estimators<<endl;
+cout<<"Effectivity indices "<<EffectivityIndex<<endl; ff<<"Effectivity indices "<<EffectivityIndex<<endl;
+
+// compute the convergencve rate
+
+real[int] RateError(FinalLevel);
+for (int i=0; i<FinalLevel; i++) {
+	if (DoFs(i+1)!=DoFs(i))
+		RateError[i] = -(log(Errors(i+1))-log(Errors(i)))/(log(DoFs(i+1))-log(DoFs(i)));
+	else {
+		if (Errors(i+1)<Errors(i))	
+			RateError[i] = 1e15;
+		else
+			RateError[i] = 1e-15;
+	}
+}
+
+cout<<"Rate of convergence "<<RateError<<endl;
+	
+//**************************************
+//  GRAPHS OF RESULTS
+//**************************************
+
+string folder = "";
+
+func int SetupLogLogPlot(string exnum, string exnumname, string xlabel, string ylabel)
+{
+  ofstream gnu(exnumname + ".plt");
+  string mypath = folder + exnumname;
+  gnu << "set logscale xy 10" << endl;
+  gnu << "set terminal png size 800,600" << endl;
+  gnu << "set output '" << mypath + ".png'" << endl;
+  gnu << "set title '" << exnum + "'" << endl;
+  gnu << "set xlabel '" << xlabel << "'" << endl;
+  gnu << "set ylabel '" << ylabel << "'" << endl;
+  gnu << "set autoscale fix" << endl;
+  gnu << "plot";
+}
+
+func int CreateDataFile(real[int] xx, real[int] yy, string name)
+{
+  string mypath = folder + name;
+  ofstream gnudat(mypath + ".dat");
+  for (int i = 0; i <= FinalLevel; i++)
+    gnudat << xx[i] << " " << yy[i] << endl;
+}
+
+func int AddPlotToOutput(real[int] xx, real[int] yy, string exnumname, string datafile)
+{
+  CreateDataFile(xx, yy, datafile);
+  if(verb>=2) cout << "Saving to " << datafile << endl;
+  ofstream gnu(exnumname + ".plt", append);
+    gnu  << " '" << datafile + ".dat" << "'" <<  " with linespoints"
+    << " title '" << datafile << "',\\\n" ;
+}
+
+string exnum = "Rate of convergence";
+string exnumname = "ConvergenceRate";
+
+SetupLogLogPlot(exnum, exnumname, "DoFs", "Errors and estimators");
+AddPlotToOutput(DoFs, Errors, exnumname, "Errors");
+AddPlotToOutput(DoFs, Estimators, exnumname, "Estimators");
+
+//**************************************
+//   END
+//**************************************
+
+plot(Th, wait=true, cmm="final mesh "); // so that the execution window does not dissapear - plot the final mesh and wait
