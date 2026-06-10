@@ -6,8 +6,8 @@ This repository contains a high-performance numerical simulation package written
 
 ## Key Features & Methods Implemented
 
-* **Crouzeix-Raviart Finite Elements:** Discretizes the partial differential equation using nonconforming piecewise linear polynomials ($P1nc$, which enforce continuity strictly at the midpoints of mesh edges rather than at the vertices.
-* **Potential Reconstruction:** Performs a localized post-processing step to map the nonconforming solution ($uh$) onto a continuous, $H^1$-conforming Lagrange workspace ($P1$ or $P2$) while strictly imposing essential boundary constraints.
+* **Crouzeix-Raviart Finite Elements:** Discretizes the partial differential equation using nonconforming piecewise linear polynomials ($P1_{nc}$), which enforce continuity strictly at the midpoints of mesh edges rather than at the vertices.
+* **Potential Reconstruction:** Performs a localized post-processing step to map the nonconforming solution $u_h$ onto a continuous, $H^1$-conforming Lagrange workspace ($P^1$ or $P^2$) while strictly imposing essential boundary constraints.
 * **Equilibrated Flux Reconstruction:** Utilizes Raviart-Thomas mixed finite elements to construct an equilibrated flux vector field satisfying exact conservation properties.
 * **Guaranteed A Posteriori Error Estimation:** Computes explicit, mathematical upper bounds for the exact solution error using the residual energy contributions of the reconstructed potential and flux fields.
 * **Dörfler Adaptive Mesh Marking:** Features an automated mesh refinement cycle driven by the local error distribution, utilizing Dörfler marking parameters to selectively subdivide cells and optimize computational degrees of freedom.
@@ -29,7 +29,7 @@ This repository contains a high-performance numerical simulation package written
 
 ## Repository Structure
 
-* `project_final.edp`: Unified FreeFem++ source code containing mesh initializers, variational formulation blocks for the $P1nc$ system, reconstruction routines, and the loop controlling adaptive mesh subdivision.
+* `project_final.edp`: Unified FreeFem++ source code containing mesh initializers, variational formulation blocks for the $P1_{nc}$ system, reconstruction routines, and the loop controlling adaptive mesh subdivision.
 * `report_project_final.pdf`: Full mathematical and academic report outlining the theoretical proofs, error estimator derivations, and graphic convergence plots (in French).
 
 ---
